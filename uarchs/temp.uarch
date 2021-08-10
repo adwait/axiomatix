@@ -1,0 +1,13 @@
+Axiom "Writes":
+  OnCore c i =>
+  IsAnyWrite i =>
+  AddEdges [
+    ((i, Fetch          ), (i, Decode         ), "path");
+    ((i, Decode         ), (i, Execute        ), "path");
+    ((i, Execute        ), (i, MemoryStage    ), "path");
+    ((i, MemoryStage    ), (i, Writeback      ), "path");
+    ((i, Writeback      ), (i, StoreBuffer    ), "path");
+    ((i, StoreBuffer    ), (i, L1ViCLCreate   ), "path");
+    ((i, L1ViCLCreate   ), (i, L1ViCLDowngrade), "path");
+    ((i, L1ViCLDowngrade), (i, L1ViCLExpire   ), "path")
+  ].
