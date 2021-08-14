@@ -155,10 +155,10 @@ let parse_uarch filename num_cores =
 
 
 let () = 
-  let parsedOp = (parse_uarch "uarchs/temp.uarch" 1) in
+  let parsedOp = (parse_uarch "uarchs/fsu.uarch" 0) in
   (* print_int (length (parse_uarch "uarchs/temp.uarch" 1));
   print_int (length (List.nth parsedOp 1)); *)
-  print_string (Uspec.Translate.convertToLisp (List.nth (List.nth parsedOp 1) 0));
+  print_string (Uspec.Translate.convertToLisp (List.nth parsedOp 0));
   (* all_contexts formula_0 2; *)
 
   (* let retstring = (getCore (Program.Core 1)) in   *)

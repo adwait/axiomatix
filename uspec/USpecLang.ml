@@ -3,6 +3,10 @@ open Utils
 type ('a, 'b) prod =
 | Pair of 'a * 'b
 
+let first (pr : ('a, 'b) prod) : 'a =
+  match pr with
+  | Pair (x, _) -> x
+
 type stringOrInt =
 | SoISum of stringOrInt * stringOrInt
 | SoIString of string
@@ -69,7 +73,8 @@ type architectureLevelEdge = ((int, int) prod, string) prod
 type fOLState = { stateNodes : graphNode list;
   stateNotNodes : graphNode list;
   stateEdgeNodes : graphNode list;
-  stateEdges : graphEdge list; stateUops : microop list;
+  stateEdges : graphEdge list; 
+  stateUops : microop list;
   stateInitial : boundaryCondition list;
   stateFinal : boundaryCondition list;
   stateArchEdges : architectureLevelEdge list }
