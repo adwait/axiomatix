@@ -27,6 +27,7 @@ type token =
   | IFF
   | LPAREN
   | RPAREN
+  | PRED
   | LBRACKET
   | RBRACKET
   | ANYNAME

@@ -1,0 +1,311 @@
+% Legend:
+% "/\" = AND
+% "\/" = OR
+% "~"  = NOT
+% "=>" = IMPLIES
+% "%"  = COMMENT
+%
+% Graph node = (instruction, (pipeline, stage number))
+% Graph edge = (node, node, label)
+%
+% "c" is predefined to be the core ID
+
+% About this microarchitecture:
+%
+% -"Barrier" is used to refer to an operation that orders other operations. It could be an acquire/release or a fence.
+% -The microarchitecture implements six types of acquire/release. The six types are:
+%
+%  -SC_CumRelease/Acquire - these are SC acquires and releases that become visible to all cores at the same time and preserve
+%  program order (including Rel->Acq). They are cumulative, so their releases will propagate writes that were previously read
+%  but are not "native" to the releasing core.
+%
+%  -SC_Release/Acquire - these are SC acquires and releases that become visible to all cores at the same time and preserve program
+%  order (including Rel->Acq). They are not cumulative, so their releases will not propagate writes that were previously read but
+%  are not "native" to the releasing core. Their allowed outcomes should be identical to SC_CumRelease/Acquire for programs that
+%  are properly synchronised.
+%
+%  -CppRelease/Acquire - these are C++-style "weak" acquires and releases. They preserve program order (except Rel->Acq), but do not
+%  become visible eagerly, only when the release is read, and that too by a corresponding C++ acquire or C++ SC read (i.e. SC_CumAcquire).
+%  These acquire/releases are cumulative.
+%
+%  -RCpc_Release/Acquire - these are RCpc-style "weak" acquires and releases. They preserve program order (except Rel->Acq). Releases
+%  make all writes before them (non-cumulatively) visible to *all* cores before the release is made visible to anyone. The release
+%  itself can become visible to different cores at different times. I believe this is how RCpc is intended to be implemented per
+%  Gharachorloo's 1990 paper.
+%
+%  -RCpc_Lazy_Release/Acquire - these are RCpc-style "weak" acquires and releases. They preserve program order (except Rel->Acq), but
+%  do not become visible eagerly, only when the release is read (not necessarily by an acquire, though this can be changed if necessary).
+%  These acquire/releases are not cumulative. These acquire/releases are identical to C++ acquire-releases, except that they aren't cumulative.
+%  This is how I originally thought RCpc was implemented when I read Gharachorloo90, but I need to go over his thesis to iron this out.
+%
+%  -RISCV_Acqrel - these are RISC-V's acquire+release operations. They can be either reads or writes (which is silly). They behave
+%  like SC_Release/Acquire but enforce ordering on both prior *and* later accesses (forbidding roach motel), and are not cumulative.
+%
+% -The microarchitecture also implements three types of fences: regular fences, weak-cumulative lwsync-style fences, and strong cumulative
+% sync-style fences. The lwsync-style fences do not enforce exactly the ordering that an lwsync does - they order whichever pairs of operations
+% the fence specification states they should (as the RISC-V spec allows), and their B group only extends to the accesses following the "lwsync"
+% in program order rather than any accesses that are indirectly sourced from the accesses after the fence in program order. So for example,
+% Figure 9 from Herding Cats won't work as expected with regard to the propagation of x. This is due to the scheme I came up with for
+% enforcing this being incompatible with NOT edges (is it?).
+
+%   StageName 0 "PCGen".
+%   StageName 1 "Fetch".
+%   StageName 2 "Decode".
+%   StageName 3 "Execute".
+%   StageName 4 "MemoryStage".
+%   StageName 5 "Commit".
+%   StageName 6 "StoreBuffer".
+%   StageName 7 "L1ViCLCreate".
+%   StageName 8 "L1ViCLExpire".
+%   StageName 9 "L2ViCLCreate".
+%   StageName 10 "L2ViCLExpire".
+%   StageName 11 "ObservationCore0".
+%   StageName 12 "ObservationCore1".
+%   StageName 13 "ObservationCore2".
+%   StageName 14 "ObservationCore3".
+%   StageName 15 "ObservationCore4".
+
+Axiom "WriteIsBeforeFinal":
+  forall microop "w",
+  OnCore c w => (
+    forall microop "w'",
+    IsAnyWrite w => IsAnyWrite w' => SamePhysicalAddress w w' =>
+       ~SameMicroop w w' => DataFromFinalStateAtPA w' =>
+    (AddEdge ((w, L1ViCLCreate), (w', L1ViCLCreate), "ws_final", "red")
+    % I think this should be an AND rather than an OR...but I'll leave it this way for now...
+    % it probably doesn't matter.
+    /\ (
+        %(NodeExists (w, (0, L2ViCLCreate)) \/ NodeExists (w', (0, L2ViCLExpire))) => 
+    (AddEdge ((w, L2ViCLCreate), (w', L2ViCLCreate), "ws_final", "red"))))).
+
+Axiom "Reads":
+forall microops "i",
+OnCore c i =>
+IsAnyRead i =>
+AddEdges [((i, PCGen),     (i, Fetch),     "path");
+          ((i, Fetch),     (i, Decode),      "path");
+          ((i, Decode),       (i, Execute),         "path");
+          ((i, Execute),         (i, MemoryStage), "path");
+          ((i, MemoryStage), (i, Commit),   "path")]
+/\
+(
+  KnownData i
+  =>
+  (
+    (exists microop "w",
+    IsAnyWrite w /\ SameVirtualAddress w i /\ SameCore w i /\ SameData w i /\
+    AddEdges [((w, MemoryStage), (i, MemoryStage), "STBFwd", "red");
+    ((i, MemoryStage), (w, L1ViCLCreate), "STBFwd", "purple")] /\
+    ~exists microop "w'",
+    IsAnyWrite w' /\ SameVirtualAddress w w' /\ SameCore w w' /\
+    ProgramOrder w w' /\ ProgramOrder w' i)
+    \/
+    (
+      (forall microop "w", (
+  IsAnyWrite w => SameCore w i => SameVirtualAddress w i => ProgramOrder w i =>
+  AddEdge ((w, L1ViCLCreate), (i, MemoryStage), "STBEmpty", "purple"))) /\ (exists microop "s", (
+  SamePhysicalAddress s i /\ SameData s i /\ SameCore s i /\
+  AddEdge ((s, L1ViCLCreate), (i,   MemoryStage  ), "rf", "red") /\
+  AddEdge ((i,   MemoryStage  ), (s, L1ViCLExpire), "rf", "brown")))
+    )
+  )
+).
+
+
+Axiom "Writes":
+forall microops "i",
+OnCore c i =>
+IsAnyWrite i =>
+AddEdges [((i, PCGen      ), (i, Fetch     ), "path");
+          ((i, Fetch      ), (i, Decode      ), "path");
+          ((i, Decode        ), (i, Execute         ), "path");
+          ((i, Execute          ), (i, MemoryStage ), "path");
+          ((i, MemoryStage  ), (i, Commit   ), "path");
+          ((i, MemoryStage    ), (i, StoreBuffer ), "path");
+          ((i, StoreBuffer  ), (i, L1ViCLCreate  ), "path");
+          ((i, L1ViCLCreate   ), (i, L1ViCLExpire  ), "path");
+          ((i, L1ViCLCreate   ), (i, ObservationCore0  ), "path")].
+
+Axiom "Fences":
+forall microops "f",
+OnCore c f =>
+IsAnyFence f => (
+AddEdges [((f, PCGen      ), (f, Fetch     ), "path");
+          ((f, Fetch      ), (f, Decode      ), "path");
+          ((f, Decode        ), (f, Execute         ), "path");
+          ((f, Execute          ), (f, Commit   ), "path")] /\
+% This clause doesn't affect acqrels because of the IsAnyFence above.
+% TODO: I actually think we should add this edge for all fences, even
+% though I don't think it contributes to any cycles.
+(( (_pred_ CumulativeBarrier f) \/ 
+    (_pred_ StrongCumulativeBarrier f)) =>
+    AddEdge ((f, Commit), (f, ObservationCore0), "path"))).
+
+
+
+% Skipped over Axiom "Barrier_PPO_Orderings":
+
+
+% Removed the +c from ObservationCore0+c
+Axiom "EagerReleases":
+forall microops "i1",
+forall microops "r",
+IsAnyWrite i1 /\ (_pred_ EagerRelease r) =>
+    (forall microops "i3",
+        % (NodeExists (i3, L1ViCLCreate) \/ NodeExists(i3, L1ViCLExpire)) =>
+            (EdgeExists ((i3, L1ViCLCreate), (i1, L1ViCLCreate), "") /\
+            SamePhysicalAddress i1 i3 /\ OnCore c i3 /\
+            % The ProgramOrder clause is necessary if this is a read which is an eager release, which can
+            % happen in RISC-V. Such reads don't have observation nodes. Thankfully, RISC-V has no mention
+            % of cumulativity, so we can just OR in a ProgramOrder clause and be done with it.
+            ((IsAnyWrite r /\ EdgeExists ((i1, ObservationCore0), (r, ObservationCore0), "")) \/ (ProgramOrder i1 r /\ IsAnyRead r)) =>
+               AddEdge ((i3, L1ViCLExpire), (r, Execute), "eager_release"))).
+
+
+Axiom "AtomicReleases":
+forall microops "r",
+% The IsAnyWrite is necessary because reads can be releases as well in RISC-V,
+% and they won't have L1ViCLCreate nodes. Reads are automatically observed at
+% the same time by all cores (let's just sweep load atomicity under the rug for now)
+% so one doesn't need to do anything in the read-release case.
+IsAnyWrite r /\ (_pred_ AtomicRelease r) =>
+    (forall microops "i3",
+        % (NodeExists (i3, L1ViCLCreate) \/ NodeExists(i3, L1ViCLExpire)) =>
+            (EdgeExists ((i3, L1ViCLCreate), (r, L1ViCLCreate), "") /\
+            SamePhysicalAddress r i3 =>
+               % TODO: Should this not be from ViCLExpire to ViCLCreate? Or would
+               % that cause issues with maintaining single-thread consistency?
+               % Might be worth tweaking it to find out when we have time. Currently
+               % this ensures that the release is made visible to everyone *including*
+               % the performing core at the same time.
+               AddEdge ((i3, L1ViCLExpire), (r, Execute), "atomic_release"))).
+
+Axiom "RelAcqOrdering":
+forall microops "r",
+IsAnyWrite r /\ (_pred_ AtomicRelease r) =>
+    forall microops "a",
+    (_pred_ AtomicAcquire a) =>
+        ProgramOrder r a =>
+            AddEdge ((r, L1ViCLCreate), (a,     Execute ), "rel_acq", "orange").
+
+Axiom "RMW":
+forall microop "w",
+IsAnyWrite w => AccessType RMW w =>
+(exists microop "r", ConsecutiveMicroops r w /\ IsAnyRead r /\ AccessType RMW r /\
+    (forall microop "w1",
+        ProgramOrder w1 w /\ SamePhysicalAddress w w1 =>
+            AddEdge ((w1, L1ViCLCreate), (r, MemoryStage), "rmw_prior", "orange")) /\
+  ~exists microop "w'", IsAnyWrite w' /\ SamePhysicalAddress w w' /\
+    EdgesExist [((r ,   L1ViCLCreate  ), (w', L1ViCLCreate), "");
+                ((w', L1ViCLCreate), (w , L1ViCLCreate), "")]).
+
+Axiom "PO/Fetch":
+forall microops "i1",
+forall microops "i2",
+(OnCore c i1 /\ OnCore c i2 /\ ProgramOrder i1 i2) =>
+AddEdge ((i1, PCGen), (i2, PCGen), "PO", "blue").
+
+Axiom "Memory_stage_is_in-order":
+forall microops "i1",
+forall microops "i2",
+% Remove the IsAnyRead /\ IsAnyRead clause to fix the load-load reordering bug...
+OnCore c i1 => OnCore c i2 => (~(IsAnyRead i1 /\ IsAnyRead i2)) =>
+SamePhysicalAddress i1 i2 => ProgramOrder i1 i2 =>
+% NodesExist [(i1, MemoryStage); (i2, MemoryStage)] =>
+AddEdge ((i1, MemoryStage), (i2, MemoryStage), "PPO", "darkgreen").
+
+
+Axiom "Writeback_stage_is_in-order":
+forall microops "i1",
+forall microops "i2",
+OnCore c i1 => OnCore c i2 =>
+EdgeExists ((i1, PCGen), (i2, PCGen), "") =>
+% NodesExist [(i1, Commit);  (i2, Commit)] =>
+AddEdge ((i1, Commit), (i2, Commit), "PPO", "darkgreen").
+
+Axiom "Addr_Dependencies":
+forall microops "i1",
+forall microops "i2",
+(HasDependency addr i1 i2) =>
+  (AddEdge ((i1, MemoryStage), (i2, Execute), "addr_dependency")).
+
+Axiom "Data_Dependencies":
+forall microops "i1",
+forall microops "i2",
+(HasDependency data i1 i2) =>
+  (AddEdge ((i1, MemoryStage), (i2, MemoryStage), "data_dependency")).
+
+%I'm choosing to just model the ctrlisb dependency with a single
+%edge and not explicitly show the branch and isb instructions.
+Axiom "CtrlIsb_Read_Read_Dependencies":
+forall microops "i1",
+forall microops "i2",
+OnCore c i1 => OnCore c i2 =>
+(HasDependency ctrlisb i1 i2 /\ IsAnyRead i1 /\ IsAnyRead i2) =>
+  (AddEdge ((i1, MemoryStage), (i2, MemoryStage), "ctrlisb")).
+
+Axiom "Ctrl_Dependencies_Read_Write":
+forall microops "i1",
+forall microops "i2",
+OnCore c i1 => OnCore c i2 =>
+((HasDependency ctrl i1 i2 \/ HasDependency ctrlisb i1 i2) /\ IsAnyRead i1 /\ IsAnyWrite i2) =>
+(
+    % (NodeExists (i2, L1ViCLCreate)) =>
+  (AddEdge ((i1, MemoryStage), (i2, L1ViCLCreate), "dependency"))).
+
+Axiom "STB_SameAddr_FIFO":
+forall microops "i1",
+forall microops "i2",
+OnCore c i1 => OnCore c i2 =>
+EdgeExists ((i1, Commit), (i2, Commit), "") =>
+SamePhysicalAddress i1 i2 =>
+% NodesExist [(i1, StoreBuffer); (i2, StoreBuffer)] =>
+AddEdge ((i1, StoreBuffer), (i2, StoreBuffer), "PPO", "darkgreen").
+
+Axiom "STB_SameAddr_OneAtATime":
+forall microops "i1",
+forall microops "i2",
+OnCore c i1 => OnCore c i2 => IsAnyWrite i1 => IsAnyWrite i2 =>
+SamePhysicalAddress i1 i2 => ProgramOrder i1 i2 =>
+% NodesExist [(i1, L1ViCLCreate); (i2, StoreBuffer)] =>
+AddEdge ((i1, L1ViCLCreate), (i2, StoreBuffer), "PPO", "darkgreen").
+
+
+% Skipped over L1ViCLs
+
+Axiom "L2ViCLPath_1":
+  forall microop "i", (
+    OnCore c i => IsAnyWrite i =>
+    % (NodeExists (i, (0, L2ViCLCreate)) \/ NodeExists (i, (0, L2ViCLExpire))) =>
+      AddEdges [((i, L1ViCLCreate), (i, L2ViCLCreate), "path");
+                ((i, L2ViCLCreate), (i, L2ViCLExpire), "path")]).
+
+Axiom "L2ViCLPath_2":
+  forall microop "i", (
+    OnCore c i => IsAnyRead i =>
+    % (NodeExists (i, (0, L2ViCLCreate)) \/ NodeExists (i, (0, L2ViCLExpire))) =>
+      AddEdges [((i, L2ViCLCreate), (i, L1ViCLCreate), "path");
+                ((i, L2ViCLCreate), (i, L2ViCLExpire), "path")]).
+
+
+Axiom "L1ViCLNoDups":
+% SameCore 0 c =>
+forall microop "i1", (
+  % (NodeExists (i1, L1ViCLCreate) \/ NodeExists (i1, L1ViCLExpire)) =>
+  forall microop "i2", (
+    (~SameMicroop i1 i2) => SameCore i1 i2 => SamePhysicalAddress i1 i2 =>
+    % (NodeExists (i2, L1ViCLCreate) \/ NodeExists (i2, L1ViCLExpire)) => 
+    (
+      AddEdge ((i1, L1ViCLExpire), (i2, L1ViCLCreate), "NoDups", "orange") \/
+      AddEdge ((i2, L1ViCLExpire), (i1, L1ViCLCreate), "NoDups", "orange")))).
+
+Axiom "L2ViCLNoDups":
+% SameCore 0 c =>
+forall microop "i1", (
+  % (NodeExists (i1, (0, L2ViCLCreate)) \/ NodeExists (i1, (0, L2ViCLExpire))) =>
+  forall microop "i2", (
+    (~SameMicroop i1 i2) => SamePhysicalAddress i1 i2 =>
+    % (NodeExists (i2, (0, L2ViCLCreate)) \/ NodeExists (i2, (0, L2ViCLExpire))) => 
+    (
+      AddEdge ((i1, L2ViCLExpire), (i2, L2ViCLCreate), "NoDups", "orange") \/
+      AddEdge ((i2, L2ViCLExpire), (i1, L2ViCLCreate), "NoDups", "orange")))).

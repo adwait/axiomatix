@@ -45,6 +45,7 @@ rule token = parse
   | "]"                             {RBRACKET}
   | '"'                             {QUOTE}
   | "+"                             {PLUS}
+  | "_pred_"                        {PRED}
   | '%' [^ '\n']*                   {token lexbuf}
   | ['\n']
     {let pos = lexbuf.Lexing.lex_curr_p in

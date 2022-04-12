@@ -11,6 +11,7 @@
 %token COMMA PERIOD COLON SEMICOLON QUOTE
 %token AND OR NOT IMPLIES IFF
 %token LPAREN RPAREN
+%token PRED
 %token LBRACKET RBRACKET
 %token ANYNAME WITH AS
 %token EOF
@@ -116,7 +117,8 @@ predicate:
   | str edge {USpecLang.fOLLookupPredicate_E $1 $2}
   | str edgelist {USpecLang.fOLLookupPredicate_lE $1 $2}
   | str node {USpecLang.fOLLookupPredicate_N $1 $2}
-  | str nodelist {USpecLang.fOLLookupPredicate_lN $1 $2};
+  | str nodelist {USpecLang.fOLLookupPredicate_lN $1 $2}
+  | LPAREN PRED str str RPAREN {USpecLang.fOLLookupPredicate_custom_S $3 $4};
 
 edgelist:
   LBRACKET edges RBRACKET {$2};

@@ -118,6 +118,7 @@ type fOLPredicateType =
 | PredFalse
 | PredHasID of int * int * int * int * string
 | PredHasGlobalID of int * string
+| PredCustom of string * string
 
 type fOLTerm =
 | IntTerm of string * int
@@ -253,6 +254,10 @@ let fOLLookupPredicate_lN name a =
   if name = "NodesExist" then PredNodesExist a
   else warning PredFalse ("Predicate " ^ name ^ " not found!")
 
+(* Custom lookup predicate *)
+let fOLLookupPredicate_custom_S name a =
+  PredCustom (name, a)
+
 (* ------------------------------- *)
 (* Helper functions for the axioms *)
 (* ------------------------------- *)
@@ -330,4 +335,5 @@ let predToName (fOLPredicate : fOLPredicateType) : string =
   | PredFalse  -> "False"
   | PredHasID  _ -> "HasID"
   | PredHasGlobalID  _ -> "HasGlobalID"
+  | PredCustom (s, _) -> s
   

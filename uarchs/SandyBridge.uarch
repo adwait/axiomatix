@@ -1,0 +1,936 @@
+% Legend:
+% "/\" = AND
+% "\/" = OR
+% "~"  = NOT
+% "=>" = IMPLIES
+% "%"  = COMMENT
+%
+% Graph node = (instruction, (pipeline, stage number))
+% Graph edge = (node, node, label)
+%
+% "c" is predefined to be the core ID
+
+StageName 0 "Fetch".
+StageName 1 "Dispatch".
+StageName 2 "Issue".
+StageName 3 "AGU".
+StageName 4 "AccessTLB".
+StageName 5 "ViTLCreate".
+StageName 6 "ViTLExpire".
+StageName 7 "SB-VTag/Index/Data".
+StageName 8 "LB-Index".
+StageName 9 "LB-SB-IndexCompare".
+StageName 10 "LB-SB-VTagCompare".
+StageName 11 "SB-PTag".
+StageName 12 "LB-PTag".
+StageName 13 "LB-SB-PTagCompare".
+StageName 14 "SB-LB-DataForward".
+StageName 15 "AccessCache".
+StageName 16 "CacheLineInvalidated".
+StageName 17 "WriteBack".
+StageName 18 "CAMSearch".
+StageName 19 "Commit".
+StageName 20 "StoreBuffer".
+StageName 21 "MemoryHierarchy".
+
+DefineMacro "STBFwd":
+  % Forward from the store buffer
+  exists microop "w", (
+    IsAnyWrite w /\
+    SameCore w i /\
+    SameVirtualAddress w i /\
+    SameData w i /\
+    AddEdges [((w, (c, MemoryStage)), (i, (c, MemoryStage)), "STBFwd", "red");
+              ((i, (c, MemoryStage)), (w, (c, MemoryHierarchy)), "STBFwd")]).
+
+DefineMacro "STBEmpty":
+  % Store buffer is empty
+  forall microop "w", (
+    (IsAnyWrite w /\ SameCore w i /\ SameVirtualAddress w i) =>
+    AddEdge ((w, (0, MemoryHierarchy)), (i, (c, MemoryStage)), "STBEmpty")).
+
+DefineMacro "NoWritesToSamePABetweenSourceAndRead" r:
+  % Read from "w", and there must not exist any writes w' in between w and i
+  exists microop "w", (
+    IsAnyWrite w /\
+    SamePhysicalAddress w r /\
+    SameData w r /\
+    AddEdge ((w, (0, MemoryHierarchy)), (r, (c, AccessCache)), "rf", "red") /\
+    ~(exists microop "w'",
+      SamePhysicalAddress r w' /\
+      EdgesExist [((w , (0, MemoryHierarchy)), (w', (0, MemoryHierarchy)), "");
+                  ((w', (0, MemoryHierarchy)), (r , (c, AccessCache)), "")])).
+
+DefineMacro "NoWritesToSameREGBetweenSourceAndRead" r:
+  % Read from "w", and there must not exist any writes w' in between w and i
+  exists microop "w", (
+    IsAnyWrite w /\
+    SamePhysicalAddress w r /\
+    SameCore w r /\
+    SameData w r /\
+    AddEdge ((w, (c, WriteBack)), (r, (c, AccessCache)), "rf", "red") /\
+    ~(exists microop "w'",
+      SamePhysicalAddress r w' /\
+      SameCore r w' /\
+      EdgesExist [((w , (c, WriteBack)), (w', (c, WriteBack)), "");
+                  ((w', (c, WriteBack)), (r , (c, AccessCache)), "")])).
+
+DefineMacro "BeforeOrAfterEveryWriteToSamePA" r:
+  % Either before or after every write to the same physical address
+  forall microop "w", (
+    (IsAnyWrite w /\ SamePhysicalAddress w r /\ ~(AccessType IRQCheck w \/ AccessType IRET w)) =>
+
+    (~AccessType ptwalk r /\
+
+    (AddEdge ((w, (0, MemoryHierarchy)), (r, (c, AccessCache)), "wsrf", "crimson") \/
+     ((~AccessType IPIReceive r => 
+     AddEdge ((r, (c, CacheLineInvalidated)), (w, (0, MemoryHierarchy)), "fr", "red"))
+     /\
+     (AccessType IPIReceive r => 
+     AddEdge ((r, (c, AccessCache)), (w, (0, MemoryHierarchy)), "fr", "red"))
+
+     )))
+
+     \/
+     (
+     	NodeExists (w, (0, MemoryHierarchy)) =>
+     	NodeExists (r, (c, AccessCache)) =>
+        AddEdge ((w, (0, MemoryHierarchy)), (r, (c, AccessCache)), "wsrf", "crimson")
+
+     )
+
+
+	).
+
+DefineMacro "BeforeOrAfterEveryWriteToSameREG" r:
+  % Either before or after every write to the same physical address
+  forall microop "w", (
+    (IsAnyWrite w /\ SamePhysicalAddress w r /\ SameCore w r) =>
+    (AddEdge ((w, (c, WriteBack)), (r, (c, AccessCache)), "wsrf", "crimson") \/
+     AddEdge ((r, (c, AccessCache)), (w, (c, WriteBack)), "fr", "red"))).
+
+DefineMacro "BeforeAllWrites" r:
+  % Read occurs before all writes to same PA & Data
+  DataFromInitialStateAtPA r /\
+  forall microop "w", (
+    (IsAnyWrite w /\ SamePhysicalAddress w r /\ NodeExists (w, (0, MemoryHierarchy))) =>
+    AddEdge ((r, (c, CacheLineInvalidated)), (w, (0, MemoryHierarchy)), "fr", "red")).
+
+DefineMacro "BeforeAllREGWrites" r:
+  % Read occurs before all writes to same PA & Data
+  DataFromInitialStateAtPA r /\
+  forall microop "w", (
+    (IsAnyWrite w /\ SamePhysicalAddress w r /\ NodeExists (w, (c, WriteBack))) =>
+    AddEdge ((r, (c, AccessCache)), (w, (c, WriteBack)), "fr", "red")).
+
+DefineMacro "IndexMiss" r:
+	AddEdges [((r, (c, LB-PTag)), (r, (c, AccessCache)), "path");
+			  ((r, (c, AccessCache)), (r, (c, WriteBack)), "path");
+			  ((r, (c, LB-SB-IndexCompare)), (r, (c, AccessCache)), "path");
+			  ((r, (c, AccessCache)),  (r, (c, CacheLineInvalidated)),     "path")].
+
+DefineMacro "NoWritesToSameIndexOnSameCore" r:
+	~(exists microop "w", (
+		SameCore w r /\ IsAnyWrite w /\ SameIndex w r
+	)).
+
+DefineMacro "BeforeWritesToSameIndexOnSameCore" r:
+	~(exists microop "w", (
+		ProgramOrder w r /\ SameCore w r /\ IsAnyWrite w /\ SameIndex w r
+	)).
+
+
+DefineMacro "LBSearch" r:
+	forall microop "w", (
+		(SameCore w r /\ IsAnyWrite w /\ ProgramOrder w r /\ SamePhysicalAddress w r) =>
+		(AddEdge ((w, (c, CAMSearch)), (r, (c, LB-Index)), "BeforeLBEntryWroteIndex", "dodgerblue3") \/
+		 AddEdge ((r, (c, Commit)), (w, (c, CAMSearch)), "AfterLdCommits", "dodgerblue3")
+		)
+	).
+
+
+DefineMacro "StoreBufferForwardVTag":
+	exists microop "w", (
+		SameCore w i /\ IsAnyWrite w /\ ProgramOrder w i /\ SameIndex w i /\ SameData w i /\ SameVirtualTag w i /\
+		AddEdge ((w, (c, SB-VTag/Index/Data)), (i, (c, LB-SB-IndexCompare)), "SBEntryIndexPresent", "dodgerblue3") /\
+		AddEdge ((i, (c, SB-LB-DataForward)), (w, (0, MemoryHierarchy)), "BeforeSBEntryLeaves", "dodgerblue3") /\
+		AddEdge ((i, (c, LB-SB-IndexCompare)), (i, (c, LB-SB-VTagCompare)), "path") /\
+		AddEdge ((i, (c, LB-SB-VTagCompare)), (i, (c, SB-LB-DataForward)), "path") /\
+		AddEdge ((i, (c, LB-PTag)), (i, (c, Commit)), "path") /\
+		AddEdge ((i, (c, SB-LB-DataForward)), (i, (c, WriteBack)), "path") /\
+		ExpandMacro StoreBufferNoMatchesBetweenSourceAndRead
+	).
+
+DefineMacro "StoreBufferForwardPTag":
+	exists microop "w", (
+		SameCore w i /\ IsAnyWrite w /\ ProgramOrder w i /\ SameIndex w i /\ ~(SameVirtualTag w i) /\ SamePhysicalTag w i /\ SameData w i /\
+		AddEdge ((w, (c, SB-VTag/Index/Data)), (i, (c, LB-SB-IndexCompare)), "SBEntryIndexPresent", "dodgerblue3") /\
+		AddEdge ((w, (c, SB-PTag)), (i, (c, LB-SB-PTagCompare)), "SBEntryPTagPresent", "dodgerblue3") /\
+		AddEdge ((i, (c, SB-LB-DataForward)), (w, (0, MemoryHierarchy)), "BeforeSBEntryLeaves", "dodgerblue3") /\
+		AddEdge ((i, (c, LB-SB-IndexCompare)), (i, (c, LB-SB-VTagCompare)), "path") /\
+		AddEdge ((i, (c, LB-SB-VTagCompare)), (i, (c, LB-SB-PTagCompare)), "path") /\
+		AddEdge ((i, (c, LB-PTag)), (i, (c, LB-SB-PTagCompare)), "path") /\
+		AddEdge ((i, (c, LB-SB-PTagCompare)), (i, (c, SB-LB-DataForward)), "path") /\
+		AddEdge ((i, (c, SB-LB-DataForward)), (i, (c, WriteBack)), "path") /\
+		ExpandMacro StoreBufferNoMatchesBetweenSourceAndRead
+	).
+
+DefineMacro "StoreBufferNoMatchesBetweenSourceAndRead":
+	(forall microop "w'", (
+		(SameCore w w' /\ IsAnyWrite w' /\ ProgramOrder w w' /\ ProgramOrder w' i /\ SameIndex w w') =>
+		(
+			(
+				ExpandMacro IndexHitTagsMiss
+				\/
+				ExpandMacro IndexNotPresent
+			)
+		) 
+
+	)).
+
+DefineMacro "IndexHitTagsMiss":
+(	~(SameVirtualTag w w') /\ ~(SamePhysicalTag w w') /\
+	AddEdge ((w', (c, SB-VTag/Index/Data)), (i, (c, LB-SB-IndexCompare)), "SBEntryIndexPresent", "dodgerblue3") /\
+	AddEdge ((w', (c, SB-PTag)), (i, (c, LB-SB-PTagCompare)), "SBEntryPTagPresent", "dodgerblue3") /\
+	AddEdge ((i, (c, LB-SB-PTagCompare)), (w', (0, MemoryHierarchy)), "BeforeSBEntryLeaves", "dodgerblue3") /\
+	AddEdge ((i, (c, LB-SB-IndexCompare)), (i, (c, LB-SB-VTagCompare)), "path") /\
+	AddEdge ((i, (c, LB-SB-VTagCompare)), (i, (c, LB-SB-PTagCompare)), "path") /\
+	AddEdge ((i, (c, LB-PTag)), (i, (c, LB-SB-PTagCompare)), "path") /\
+	AddEdge ((i, (c, LB-SB-PTagCompare)), (i, (c, AccessCache)), "path") /\
+	AddEdge ((i, (c, AccessCache)), (i, (c, WriteBack)), "path")
+).
+
+DefineMacro "IndexNotPresent":
+(	
+	(
+		AddEdge ((i, (c, LB-SB-IndexCompare)), (w', (c, SB-VTag/Index/Data)), "BeforeSBEntryWroteIndex", "dodgerblue3")
+		/\
+		(SamePhysicalTag w w' =>
+			(AddEdge ((w', (c, CAMSearch)), (i, (c, LB-Index)), "BeforeLBEntryWroteIndex", "dodgerblue3") \/
+		 	AddEdge ((i, (c, Commit)), (w', (c, CAMSearch)), "AfterLdCommits", "dodgerblue3")
+			)
+		)
+	)
+	\/
+	AddEdge ((w', (0, MemoryHierarchy)), (i, (c, LB-SB-IndexCompare)), "SBEntryLeftSB", "dodgerblue3")
+).
+
+DefineMacro "BeforeWritesToSameVAPAOnSameCore" r:
+	~(exists microop "w", (
+		ProgramOrder w r /\ SameCore w r /\ IsAnyWrite w /\ SameIndex w r /\ (SamePhysicalTag w r \/ SameVirtualTag w r)
+	)).
+
+DefineMacro "BeforeAllWritesToSameVTag" r:
+	~(exists microop "w", (
+		ProgramOrder w r /\ IsAnyWrite w /\ SameVirtualTag w r
+	)).
+
+%NEED TO DO
+DefineMacro "StoreBufferForwardPTWalk":
+	exists microop "w", (
+		SameCore w j /\ IsAnyWrite w /\ ProgramOrder w j /\ SameIndex w j /\ SamePhysicalTag w j /\ SameData w j /\
+		AddEdge ((w, (c, SB-VTag/Index/Data)), (j, (c, LB-SB-IndexCompare)), "SBEntryIndexPresent", "dodgerblue3") /\
+		AddEdge ((w, (c, SB-PTag)), (j, (c, LB-SB-PTagCompare)), "SBEntryPTagPresent", "dodgerblue3") /\
+		AddEdge ((w, (0, MemoryHierarchy)), (j, (c, AccessCache)), "WaitStoreWrite", "dodgerblue3") /\
+		AddEdge ((j, (c, LB-SB-IndexCompare)), (j, (c, LB-SB-PTagCompare)), "path") /\
+		AddEdge ((j, (c, LB-PTag)), (j, (c, LB-SB-PTagCompare)), "path") /\
+		AddEdge ((j, (c, LB-SB-PTagCompare)), (j, (c, AccessCache)), "path") /\
+		ExpandMacro StoreBufferNoMatchesBetweenSourceAndRead
+	).
+
+
+DefineMacro "IndexMissComparison" r:
+	forall microop "w", (
+		(SameCore w r /\ IsAnyWrite w /\ ProgramOrder w r /\ SameIndex w r /\ NodesExist [(w, (c, SB-VTag/Index/Data))]) =>
+		 (
+		 (
+			AddEdge ((r, (c, LB-SB-IndexCompare)), (w, (c, SB-VTag/Index/Data)), "BeforeSBEntryWroteIndex", "dodgerblue3")
+
+		 )
+		 \/ AddEdge ((w, (0, MemoryHierarchy)), (r, (c, LB-SB-IndexCompare)), "SBEntryLeftSB", "dodgerblue3")
+		 )
+	).
+
+
+DefineMacro "PTWalkReadTLBHIT" r':
+forall microop "j",
+SameCore j r' =>
+SameThread j r' =>
+SameGlobalID j r' =>
+~(SameIntraInstructionID j r') =>
+IsRead j =>
+AccessType ptwalk j =>
+AddEdges [
+	  ((j, (c, WriteBack)), (j, (c, ViTLCreate)), "PTWalk");
+	  ((j, (c, ViTLCreate)), (j, (c, ViTLExpire)), "path");
+	  ((j, (c, LB-PTag)), (j, (c, AccessCache)), "path");
+%	  ((j, (c, LB-Index)), (j, (c, LB-PTag)), "path");
+	  ((j, (c, AccessCache)), (j, (c, WriteBack)), "path");
+	  ((j, (c, LB-Index)), (j, (c, LB-SB-IndexCompare)), "path");
+	  ((j, (c, ViTLCreate)), (r', (c, AccessTLB)), "PTWalk");
+	  ((r', (c, AccessTLB)), (j, (c, ViTLExpire)), "PTWalk")]
+/\
+(
+	(
+		ExpandMacro IndexMiss j
+			/\
+			(
+				(
+					(
+%						ExpandMacro BeforeWritesToSameVAPAOnSameCore j /\
+						ExpandMacro BeforeAllWrites j
+					) 
+				)
+				\/
+				(
+					ExpandMacro NoWritesToSamePABetweenSourceAndRead j
+					/\
+	        		ExpandMacro BeforeOrAfterEveryWriteToSamePA j
+	        		/\
+					(
+						(
+							ExpandMacro IndexMissComparison j
+						)
+					)
+				)
+			)
+	)
+	%\/
+	%ExpandMacro StoreBufferForwardPTWalk
+	%to do
+
+).
+
+Axiom "Reads":
+forall microops "i",
+OnCore c i =>
+IsRead i =>
+(AccessType normal i \/ AccessType RMW i \/ AccessType IPIAck i) =>
+AddEdges [((i, (c, Fetch)),      	          (i, (c, Dispatch)),     "path");
+		  ((i, (c, Dispatch)),      		  (i, (c, Issue)),     "path");
+		  ((i, (c, Issue)),      		      (i, (c, AGU)),     "path");
+%		  ((i, (c, AGU)),      				  (i, (c, CheckTLB)),     "path");
+		  ((i, (c, AGU)),      				  (i, (c, AccessTLB)),     "path");
+		  ((i, (c, AGU)),      				  (i, (c, LB-Index)),     "path");
+		  ((i, (c, AccessTLB)),      		  (i, (c, LB-PTag)),     "path");
+		  ((i, (c, LB-Index)),      		  (i, (c, LB-SB-IndexCompare)),     "path");
+		  ((i, (c, LB-Index)),      		  (i, (c, LB-PTag)),     "path");
+%		  ((i, (c, AccessCache)),      		  (i, (c, CacheLineInvalidated)),     "path");
+		  ((i, (c, WriteBack)),     		  (i, (c, Commit)),     "path")]
+          %missing vitls/cache/fwd
+/\
+(
+	(
+		ExpandMacro IndexMiss i
+			/\
+			(
+				(
+					(
+%						ExpandMacro BeforeWritesToSameVAPAOnSameCore i /\
+						ExpandMacro BeforeAllWrites i
+					)
+				)
+				\/
+				(
+					ExpandMacro NoWritesToSamePABetweenSourceAndRead i
+					/\
+	        		ExpandMacro BeforeOrAfterEveryWriteToSamePA i
+	        		/\
+					(
+						(
+							ExpandMacro IndexMissComparison i
+							/\
+							ExpandMacro LBSearch i
+						)
+					)
+				)
+			)
+	)
+	\/
+	%IndexHitVTagHit
+	(
+		ExpandMacro StoreBufferForwardVTag
+	)
+	\/
+	%IndexHitVTagMissPTagHit
+	(
+		ExpandMacro StoreBufferForwardPTag
+	)
+
+
+).
+
+DefineMacro "WriteIsBeforeFinal":
+  forall microop "w",
+  forall microop "w'",
+  (IsAnyWrite w /\ IsAnyWrite w' /\ SamePhysicalAddress w w' /\
+     ~SameMicroop w w' /\ DataFromFinalStateAtPA w') =>
+  AddEdge ((w, (0, MemoryHierarchy)), (w', (0, MemoryHierarchy)), "ws_final").
+
+Axiom "Writes":
+forall microops "i",
+OnCore c i =>
+IsWrite i =>
+(AccessType normal i \/ AccessType RMW i \/ AccessType IPIAck i) =>
+AddEdges [((i, (c, Fetch)),      	          (i, (c, Dispatch)),     "path");
+		  ((i, (c, Dispatch)),      		  (i, (c, Issue)),     "path");
+		  ((i, (c, Issue)),      		      (i, (c, AGU)),     "path");
+		  ((i, (c, AGU)),      				  (i, (c, AccessTLB)),     "path");
+		  ((i, (c, AGU)),      				  (i, (c, SB-VTag/Index/Data)),     "path");
+		  ((i, (c, AccessTLB)),      		  (i, (c, SB-PTag)),     "path");
+		  ((i, (c, SB-VTag/Index/Data)),      (i, (c, SB-PTag)),     "path");
+		  ((i, (c, WriteBack)),     		  (i, (c, CAMSearch)),     "path");
+          ((i, (c, CAMSearch)),     		  (i, (c, Commit)),    "path");
+          ((i, (c, Commit)),                  (i, (c, StoreBuffer)), "path");
+          ((i, (c, StoreBuffer)),   		  (i, (0, MemoryHierarchy)),  "path");
+          ((i, (c, SB-PTag)), (i, (c, WriteBack)), "path")]
+          %missing vitls and forwarding connections
+/\
+(
+	~(AccessType IPIAck i) =>
+	ExpandMacro DirtyBitStore
+
+)
+/\
+(
+	ExpandMacro WriteIsBeforeFinal
+)
+/\
+(
+% Only one at a time allowed out from the store buffer
+forall microop "w", (
+  (IsAnyWrite w /\ SameCore w i /\ ProgramOrder i w /\ ~(AccessType IRQCheck w \/ AccessType IRET w)) =>
+    NodeExists (w, (c, StoreBuffer)) =>
+    AddEdges [((i, (0, MemoryHierarchy)), (w, (c, StoreBuffer)), "STBOne")])
+).
+
+
+Axiom "PO/Fetch":
+forall microops "i1",
+forall microops "i2",
+(OnCore c i1 /\ OnCore c i2 /\ ConsecutiveMicroops i1 i2 /\ ~(AccessType ptwalk i1 \/ AccessType dirtybit i1 \/ AccessType IPIReceive i1 \/ AccessType IRQCheck i1 \/ AccessType IRET i1) /\ ~(AccessType ptwalk i2 \/ AccessType dirtybit i2 \/ AccessType IPIReceive i2 \/ AccessType IRQCheck i2 /\ AccessType IRET i2)) =>
+AddEdge ((i1, (c, Fetch)), (i2, (c, Fetch)), "PO", "blue").
+
+Axiom "Dispatch_stage_is_in-order":
+forall microops "i1",
+forall microops "i2",
+EdgeExists ((i1, (c, Fetch)),  (i2, (c, Fetch)), "") =>
+NodesExist [(i1, (c, Dispatch)); (i2, (c, Dispatch))] =>
+AddEdge ((i1, (c, Dispatch)), (i2, (c, Dispatch)), "PPOuarch", "darkgreen").
+
+Axiom "Commit_stage_is_in-order":
+forall microops "i1",
+forall microops "i2",
+EdgeExists ((i1, (c, Dispatch)),  (i2, (c, Dispatch)), "") =>
+NodesExist [(i1, (c, Commit)); (i2, (c, Commit))] =>
+AddEdge ((i1, (c, Commit)), (i2, (c, Commit)), "PPOuarch", "darkgreen").
+
+Axiom "write_serialization":
+SameCore 0 c =>
+forall microops "i1", forall microops "i2",
+SmallerGlobalID i1 i2 =>
+( ~(SameMicroop i1 i2) /\ IsAnyWrite i1 /\ IsAnyWrite i2 /\ SamePhysicalAddress i1 i2 /\ ~(AccessType IRQCheck i1 \/ AccessType IRET i1) /\ ~(AccessType IRQCheck i2 \/ AccessType IRET i2)) =>
+(NodesExist [(i1, (0, MemoryHierarchy)); (i2, (0, MemoryHierarchy))]) =>
+(AddEdge ((i1, (0, MemoryHierarchy)), (i2, (0, MemoryHierarchy)), "ws", "red") \/
+ AddEdge ((i2, (0, MemoryHierarchy)), (i1, (0, MemoryHierarchy)), "ws", "red")).
+
+
+Axiom "STB_FIFO":
+forall microops "i1",
+forall microops "i2",
+EdgeExists ((i1, (c, Commit)),   (i2, (c, Commit)), "") =>
+NodesExist [(i1, (c, StoreBuffer)); (i2, (c, StoreBuffer))] =>
+AddEdge ((i1, (c, StoreBuffer)), (i2, (c, StoreBuffer)), "PPOuarch", "darkgreen").
+
+Axiom "SLR":
+forall microop "i1",
+forall microop "i2",
+IsAnyRead i1 /\ IsAnyRead i2 /\ OnCore c i1 /\ ProgramOrder i1 i2 /\ AccessType normal i1 /\ AccessType normal i2 =>
+AddEdge ((i1, (c, AccessCache)), (i2, (c, CacheLineInvalidated)), "SLR", "pink").
+
+Axiom "mfence":
+forall microops "f",
+OnCore c f =>
+IsAnyFence f /\ AccessType MFENCE f =>
+AddEdges [((f, (c, Fetch)),       (f, (c, Dispatch)),      "path");
+          ((f, (c, Dispatch)),      (f, (c, Issue)),     "path");
+          ((f, (c, Issue)),      (f, (c, AGU)),     "path");
+          ((f, (c, AGU)),     (f, (c, WriteBack)), "path");
+          ((f, (c, WriteBack)), (f, (c, Commit)),   "path")]
+/\ (
+  forall microops "w",
+  ((IsAnyWrite w /\ SameCore w f /\ ProgramOrder w f) =>
+  	 NodesExist [(w, (0,MemoryHierarchy))] =>
+     AddEdge ((w, (0, MemoryHierarchy)), (f, (c, AGU)), "mfence", "orange")))
+ /\ (
+forall microops "r",
+  ((IsAnyRead r /\ SameCore r f /\ ProgramOrder f r) =>
+  	NodesExist [(r, (c,AccessCache))] =>
+     AddEdge ((f, (c, AGU)), (r, (c, AccessCache)), "mfence", "orange"))).
+
+Axiom "RMW":
+forall microop "w",
+IsAnyWrite w => AccessType RMW w =>
+(forall microops "i2", ProgramOrder w i2 => IsAnyRead i2 /\
+  AddEdge ((w, (0, MemoryHierarchy)), (i2, (CoreOf i2, AccessCache)), "rmw", "orange")) /\
+(exists microop "r", ConsecutiveMicroops r w /\ IsAnyRead r /\ AccessType RMW r /\
+  ~exists microop "w'", IsAnyWrite w' /\ SamePhysicalAddress w w' /\
+    EdgesExist [((r , (CoreOf r, AccessCache)), (w', (0, MemoryHierarchy)), "");
+                ((w', (0,    MemoryHierarchy)), (w , (0, MemoryHierarchy)), "")]).
+
+
+Axiom "Invlpg":
+forall microops "f", (
+OnCore c f =>
+IsAnyFence f /\ AccessType INVLPG f =>
+AddEdges [((f, (c, Fetch)),       (f, (c, Dispatch)),      "path");
+          ((f, (c, Dispatch)),      (f, (c, Issue)),     "path");
+          ((f, (c, Issue)),      (f, (c, AGU)),     "path");
+          ((f, (c, AGU)),     (f, (c, WriteBack)), "path");
+          ((f, (c, WriteBack)), (f, (c, Commit)),   "path")]
+/\ (
+		forall microops "j", (
+			SameCore f j /\ SameVirtualTag f j /\
+			NodesExist [(j, (c, ViTLCreate)); (j, (c, ViTLExpire))] =>
+			(
+			  AddEdges [((j, (c, ViTLExpire)), (f, (c, AGU)), "invlpg", "orange")]
+			  \/
+			  AddEdges [((f, (c, AGU)), (j, (c, ViTLCreate)), "invlpg", "orange")]
+			)
+		)
+	)
+/\ (
+  forall microops "w",
+  ((IsAnyWrite w /\ SameCore w f /\ (EdgesExist [((w , (c, Dispatch)), (f, (c, Dispatch)), "")])) =>
+     AddEdge ((w, (0, MemoryHierarchy)), (f, (c, AGU)), "invlpg", "orange")))
+
+ /\ (
+forall microops "r",
+  ((IsAnyRead r /\ SameCore r f /\ (EdgesExist [((f , (c, Dispatch)), (r, (c, Dispatch)), "")])) /\ NodesExist [(r, (c, AccessCache))] =>
+     AddEdge ((f, (c, AGU)), (r, (c, AccessCache)), "invlpg", "orange")))
+ 
+ /\ (
+forall microops "r",
+  ((SameCore r f /\ (EdgesExist [((f , (c, Dispatch)), (r, (c, Dispatch)), "")])) =>
+     forall microops "r'",(
+     	SameGlobalID r r' /\ IsRead r' /\ NodesExist [(r', (c, AccessCache))] =>
+     	AddEdge ((f, (c, AGU)), (r', (c, AccessCache)), "invlpg", "orange"))) 
+
+     )
+ 
+ /\ (
+forall microops "r",
+  ((SameCore r f /\ (EdgesExist [((f , (c, Dispatch)), (r, (c, Dispatch)), "")])) => (( NodesExist [(r, (c, Fetch))] =>
+     AddEdge ((f, (c, Commit)), (r, (c, Fetch)), "invlpg", "orange")) /\ (
+     (NodesExist [(r, (c, Dispatch))] /\ ~(NodesExist [(r, (c, Fetch))]) ) =>
+     AddEdge ((f, (c, Commit)), (r, (c, Dispatch)), "invlpg", "orange")) ))
+)).
+
+DefineMacro "DirtyBitStore":
+forall microop "j'",
+SameCore j' i =>
+SameThread j' i =>
+SameGlobalID j' i =>
+~(SameIntraInstructionID j' i) =>
+IsWrite j' =>
+AccessType dirtybit j' => 
+NodesExist [(j', (0, MemoryHierarchy))] =>
+AddEdges [
+		  ((j', (c, Dispatch)),      		  (j', (c, Issue)),     "path");
+		  ((j', (c, Issue)),      		      (j', (c, AGU)),     "path");
+
+		  ((j', (c, AGU)),      				  (j', (c, SB-VTag/Index/Data)),     "path");
+
+		  ((j', (c, SB-VTag/Index/Data)),      (j', (c, SB-PTag)),     "path");
+		  ((j', (c, WriteBack)),     		  (j', (c, CAMSearch)),     "path");
+          ((j', (c, CAMSearch)),     		  (j', (c, Commit)),    "path");
+          ((j', (c, Commit)),                  (j', (c, StoreBuffer)), "path");
+          ((j', (c, StoreBuffer)),   		  (j', (0, MemoryHierarchy)),  "path");
+          ((j', (c, SB-PTag)), (j', (c, WriteBack)), "path")]
+          %missing vitls and forwarding connections
+/\
+(
+	forall microop "k",
+	SameCore k i =>
+	SameThread k i =>
+	SameGlobalID k i =>
+	~(SameIntraInstructionID k i) =>
+	IsRead k =>
+	AccessType dirtybit k => 
+	AddEdges [
+			  ((k, (c, Dispatch)),      		  (k, (c, Issue)),     "path");
+			  ((k, (c, Issue)),      		      (k, (c, AGU)),     "path");
+
+			  ((k, (c, AGU)),      				  (k, (c, LB-Index)),     "path");
+			  ((k, (c, LB-Index)),      		  (k, (c, LB-SB-IndexCompare)),     "path");
+			  ((k, (c, LB-Index)),      		  (k, (c, LB-PTag)),     "path");
+			  ((k, (c, WriteBack)),     		  (k, (c, Commit)),     "path");
+
+	          ((k, (c, LB-PTag)), (k, (c, WriteBack)), "path");
+	          ((k, (c, Dispatch)),      		  (j', (c, Dispatch)),     "dirtybit", "aquamarine4");
+	          ((j', (c, Dispatch)),      		  (i, (c, Dispatch)),     "dirtybit", "aquamarine4")]
+
+	/\
+	(
+		ExpandMacro IndexMiss k
+			/\
+			(
+				(
+%					ExpandMacro BeforeWritesToSameVAPAOnSameCore k /\
+					ExpandMacro BeforeAllWrites k
+				)
+				\/
+				(
+					ExpandMacro NoWritesToSamePABetweenSourceAndRead k
+					/\
+	        		ExpandMacro BeforeOrAfterEveryWriteToSamePA k
+	        		/\
+					(
+						(
+							ExpandMacro IndexMissComparison k
+						)
+					)
+				)
+			)
+	)
+	/\
+	(DirtyBitAtomicity:
+	~exists microop "w'", IsAnyWrite w' /\ SamePhysicalAddress j' w' /\
+	    EdgesExist [((k , (CoreOf k, AccessCache)), (w', (0, MemoryHierarchy)), "");
+	                ((w', (0,    MemoryHierarchy)), (j' , (0, MemoryHierarchy)), "")]
+	)
+	/\
+	(
+			forall microops "i2",
+			ConsecutiveMicroops i2 i =>
+			~(AccessType ptwalk i2) =>
+			AddEdge ((i2, (c, Dispatch)), (k, (c, Dispatch)), "dirtybit", "aquamarine4")
+
+	)
+
+
+)
+/\
+(
+	forall microops "i2",
+	ConsecutiveMicroops i2 i =>
+	~(AccessType ptwalk i2) =>
+	AddEdge ((i2, (c, Dispatch)), (j', (c, Dispatch)), "dirtybit", "aquamarine4")
+
+)
+/\
+(
+	forall microops "i2", IsAnyRead i2 /\ NodesExist [(i2, (c, AccessCache))] /\ ~AccessType ptwalk i2 => (
+	  AddEdge ((j', (0, MemoryHierarchy)), (i2, (CoreOf i2, AccessCache)), "FlushAfterDirtyBitLOCK", "orange") \/
+	  AddEdge ((i2, (CoreOf i2, AccessCache)), (j', (0, MemoryHierarchy)), "ReadBeforeDirtyBitLOCK", "orange")
+    )
+)
+/\
+(
+	ExpandMacro WriteIsBeforeFinal
+)
+/\
+(
+	% Only one at a time allowed out from the store buffer
+	forall microop "w'", (
+	  (IsAnyWrite w' /\ SameCore w' j' /\ EdgesExist [((j' , (c, StoreBuffer)), (w', (c, StoreBuffer)), "")] /\ ~(AccessType IRQCheck w' \/ AccessType IRET w')) =>
+	    AddEdges [((j', (0, MemoryHierarchy)), (w', (c, StoreBuffer)), "STBOne", "brown")])
+).
+
+
+Axiom "IPIInsertions":
+forall threads "t",
+~(SameThread 0 t) =>
+Debug FIRSTHERE /\
+ExpandMacro EmbeddedIn 0 t.
+
+DefineMacro "EmbeddedIn" a b:
+forall microops "i1",
+OnCore c i1 =>
+OnThread a i1 =>
+(
+	(
+		forall microops "i2",
+		OnCore c i2 =>
+		OnThread b i2 =>
+		Debug SECONDHERE /\
+		(
+			NodesExist [(i1, (c, Commit))] =>
+
+			(( NodesExist [(i2, (c, Fetch))] =>
+     			AddEdge ((i1, (c, Commit)), (i2, (c, Fetch)), "EmbeddedIn", "skyblue")) /\ (
+     			(NodesExist [(i2, (c, Dispatch))] /\ ~(NodesExist [(i2, (c, Fetch))])) =>
+     			AddEdge ((i1, (c, Commit)), (i2, (c, Dispatch)), "EmbeddedIn", "skyblue")) /\ (
+     			(NodesExist [(i2, (c, Issue))] /\ ~(NodesExist [(i2, (c, Dispatch))]) /\ ~(NodesExist [(i2, (c, Fetch))])) =>
+     			AddEdge ((i1, (c, Commit)), (i2, (c, Issue)), "EmbeddedIn", "skyblue"))  /\ (
+     			(NodesExist [(i2, (c, AccessCache))] /\ ~(NodesExist [(i2, (c, Issue))]) /\ ~(NodesExist [(i2, (c, Dispatch))]) /\ ~(NodesExist [(i2, (c, Fetch))])) =>
+     			AddEdge ((i1, (c, Commit)), (i2, (c, AccessCache)), "EmbeddedIn", "skyblue")) /\ (
+     			(NodesExist [(i2, (c, WriteBack))] /\ ~(NodesExist [(i2, (c, AccessCache))]) /\ ~(NodesExist [(i2, (c, Issue))]) /\ ~(NodesExist [(i2, (c, Dispatch))]) /\ ~(NodesExist [(i2, (c, Fetch))])) =>
+     			AddEdge ((i1, (c, Commit)), (i2, (c, WriteBack)), "EmbeddedIn", "skyblue")))
+		)
+		/\
+		(
+			(NodesExist [(i1, (c, WriteBack))] /\ ~NodesExist [(i1, (c, Commit))]) =>
+
+			(( NodesExist [(i2, (c, Fetch))] =>
+     			AddEdge ((i1, (c, WriteBack)), (i2, (c, Fetch)), "EmbeddedIn", "skyblue")) /\ (
+     			(NodesExist [(i2, (c, Dispatch))] /\ ~(NodesExist [(i2, (c, Fetch))])) =>
+     			AddEdge ((i1, (c, WriteBack)), (i2, (c, Dispatch)), "EmbeddedIn", "skyblue")) /\ (
+     			(NodesExist [(i2, (c, Issue))] /\ ~(NodesExist [(i2, (c, Dispatch))]) /\ ~(NodesExist [(i2, (c, Fetch))])) =>
+     			AddEdge ((i1, (c, WriteBack)), (i2, (c, Issue)), "EmbeddedIn", "skyblue"))   /\ (
+     			(NodesExist [(i2, (c, AccessCache))] /\ ~(NodesExist [(i2, (c, Issue))]) /\ ~(NodesExist [(i2, (c, Dispatch))]) /\ ~(NodesExist [(i2, (c, Fetch))])) =>
+     			AddEdge ((i1, (c, WriteBack)), (i2, (c, AccessCache)), "EmbeddedIn", "skyblue")) /\ (
+     			(NodesExist [(i2, (c, WriteBack))] /\ ~(NodesExist [(i2, (c, AccessCache))]) /\ ~(NodesExist [(i2, (c, Issue))]) /\ ~(NodesExist [(i2, (c, Dispatch))]) /\ ~(NodesExist [(i2, (c, Fetch))])) =>
+     			AddEdge ((i1, (c, WriteBack)), (i2, (c, WriteBack)), "EmbeddedIn", "skyblue")))
+		)
+
+
+	)
+	\/
+	(
+		forall microops "i2",
+		OnCore c i2 =>
+		OnThread b i2 =>
+		Debug SECONDHERE /\
+		(
+			NodesExist [(i2, (c, Commit))] =>
+
+			(( NodesExist [(i1, (c, Fetch))] =>
+     			AddEdge ((i2, (c, Commit)), (i1, (c, Fetch)), "EmbeddedIn", "skyblue")) /\ (
+     			(NodesExist [(i1, (c, Dispatch))] /\ ~(NodesExist [(i1, (c, Fetch))])) =>
+     			AddEdge ((i2, (c, Commit)), (i1, (c, Dispatch)), "EmbeddedIn", "skyblue")) /\ (
+     			(NodesExist [(i1, (c, Issue))] /\ ~(NodesExist [(i1, (c, Dispatch))]) /\ ~(NodesExist [(i1, (c, Fetch))])) =>
+     			AddEdge ((i2, (c, Commit)), (i1, (c, Issue)), "EmbeddedIn", "skyblue")) /\ (
+     			(NodesExist [(i1, (c, AccessCache))] /\ ~(NodesExist [(i1, (c, Issue))]) /\ ~(NodesExist [(i1, (c, Dispatch))]) /\ ~(NodesExist [(i1, (c, Fetch))])) =>
+     			AddEdge ((i2, (c, Commit)), (i1, (c, AccessCache)), "EmbeddedIn", "skyblue")) /\ (
+     			(NodesExist [(i1, (c, WriteBack))] /\ ~(NodesExist [(i1, (c, AccessCache))]) /\ ~(NodesExist [(i1, (c, Issue))]) /\ ~(NodesExist [(i1, (c, Dispatch))]) /\ ~(NodesExist [(i1, (c, Fetch))])) =>
+     			AddEdge ((i2, (c, Commit)), (i1, (c, WriteBack)), "EmbeddedIn", "skyblue")) )
+		)
+		/\
+		(
+			(NodesExist [(i2, (c, WriteBack))] /\ ~NodesExist [(i2, (c, Commit))])  =>
+
+			(( NodesExist [(i1, (c, Fetch))] =>
+     			AddEdge ((i2, (c, WriteBack)), (i1, (c, Fetch)), "EmbeddedIn", "skyblue")) /\ (
+     			(NodesExist [(i1, (c, Dispatch))] /\ ~(NodesExist [(i1, (c, Fetch))])) =>
+     			AddEdge ((i2, (c, WriteBack)), (i1, (c, Dispatch)), "EmbeddedIn", "skyblue")) /\ (
+     			(NodesExist [(i1, (c, Issue))] /\ ~(NodesExist [(i1, (c, Dispatch))]) /\ ~(NodesExist [(i1, (c, Fetch))])) =>
+     			AddEdge ((i2, (c, WriteBack)), (i1, (c, Issue)), "EmbeddedIn", "skyblue")) /\ (
+     			(NodesExist [(i1, (c, AccessCache))] /\ ~(NodesExist [(i1, (c, Issue))]) /\ ~(NodesExist [(i1, (c, Dispatch))]) /\ ~(NodesExist [(i1, (c, Fetch))])) =>
+     			AddEdge ((i2, (c, WriteBack)), (i1, (c, AccessCache)), "EmbeddedIn", "skyblue")) /\ (
+     			(NodesExist [(i1, (c, WriteBack))] /\ ~(NodesExist [(i1, (c, AccessCache))]) /\ ~(NodesExist [(i1, (c, Issue))]) /\ ~(NodesExist [(i1, (c, Dispatch))]) /\ ~(NodesExist [(i1, (c, Fetch))])) =>
+     			AddEdge ((i2, (c, WriteBack)), (i1, (c, WriteBack)), "EmbeddedIn", "skyblue")))
+		)
+		
+	)
+).
+
+Axiom "IPIOrdering":
+forall threads "t1",
+forall threads "t2",
+~(SameThread 0 t1) =>
+~(SameThread 0 t2) =>
+~(SameThread t1 t2) =>
+(
+	ExpandMacro EmbeddedIn t1 t2
+	\/
+	ExpandMacro EmbeddedIn t2 t1
+).
+
+
+Axiom "IPIReceiveAtomicity":
+forall threads "t",
+forall microop "r",
+~(SameThread 0 t) =>
+OnThread t r =>
+IsRead r =>
+AccessType IPIReceieve r =>
+exists microop "r'",
+ConsecutiveMicroops r r' =>
+forall microop "r''",
+ConsecutiveMicroops r' r'' /\
+~exists microop "k", SameCore r k /\ ~(SameThread r k) /\
+	    EdgesExist [((r , (c, AccessCache)), (k, (c, Fetch)), "");
+	                ((k, (c, Fetch)), (r'' , (c, Dispatch)), "")].
+
+
+Axiom "AxiomIPIReceive":
+forall microops "i",
+OnCore c i =>
+IsRead i =>
+AccessType IPIReceive i =>
+AddEdges [
+		  ((i, (c, AccessCache)),      		  (i, (c, WriteBack)),     "path")]
+
+/\
+(
+	exists microop "j",
+		SameCore i j /\ SameThread i j /\ ConsecutiveMicroops i j /\ IsRead j /\ AccessType IRQCheck j /\
+		AddEdges [
+		 		  ((j, (c, AccessCache)),      		  (j, (c, WriteBack)),     "path");
+		 		  ((i, (c, WriteBack)),      		  (j, (c, AccessCache)),     "path")]
+		/\
+		(
+			exists microop "j'",
+				SameCore j j' /\ SameThread j j' /\ ConsecutiveMicroops j j' /\ IsWrite j' /\ AccessType IRQCheck j' /\
+				AddEdges [
+				 		  ((j, (c, WriteBack)),      		  (j', (c, WriteBack)),     "path")]
+			    /\
+			    forall microop "j''", (
+					SameCore j' j'' /\ SameThread j' j''  /\ ConsecutiveMicroops j' j'' =>
+					(( NodesExist [(j'', (c, Fetch))] =>
+		     			AddEdge ((j', (c, WriteBack)), (j'', (c, Fetch)), "ipi")) /\ (
+		     			(NodesExist [(j'', (c, Dispatch))] /\ ~(NodesExist [(j'', (c, Fetch))]) ) =>
+		     			AddEdge ((j', (c, WriteBack)), (j'', (c, Dispatch)), "ipi")) )
+				)
+
+
+		)
+		/\
+		(
+	      ExpandMacro BeforeAllREGWrites j
+	      \/
+	      (
+	        ExpandMacro NoWritesToSameREGBetweenSourceAndRead j
+	        /\
+	        ExpandMacro BeforeOrAfterEveryWriteToSameREG j
+	      )
+	    )
+
+)
+/\
+(
+      (
+        ExpandMacro NoWritesToSamePABetweenSourceAndRead i
+        /\
+        ExpandMacro BeforeOrAfterEveryWriteToSamePA i
+      )
+).
+
+
+Axiom "IRET":
+forall microops "i",
+OnCore c i =>
+IsWrite i =>
+AccessType IRET i =>
+~(exists microop "w",
+	ProgramOrder i w) =>
+AddEdges [((i, (c, Fetch)),      	          (i, (c, Dispatch)),     "path");
+		  ((i, (c, Dispatch)),      		  (i, (c, Issue)),     "path");
+		  ((i, (c, Issue)),      		      (i, (c, AGU)),     "path");
+		  ((i, (c, AGU)),      				  (i, (c, WriteBack)),     "path");
+		  ((i, (c, WriteBack)),     		  (i, (c, Commit)),     "path")].
+
+Axiom "IPIAcks":
+forall cores "c'",
+forall microops "i",
+OnCore c' i =>
+IsRead i =>
+AccessType IPIAck i =>
+forall microops "j",
+~(SameCore i j) =>
+IsWrite j =>
+AccessType IPIAck j =>
+SamePhysicalAddress i j =>
+SameData i j =>
+AddEdge ((j, (0, MemoryHierarchy)), (i, (c', AccessCache)), "rf", "red").
+
+Axiom "ViTLs":
+forall microops "i1",
+OnCore c i1 =>
+(AccessType normal i1 \/ AccessType RMW i1) =>
+(IsRead i1 \/ IsWrite i1) =>
+(
+	(ViTLHIT:
+		(
+			exists microop "i3",
+			SameCore i1 i3 /\
+			IsRead i3 /\
+			AccessType ptwalk i3 /\
+			(
+				IsWrite i1 => DataIsCorrectTranslation Accessed Dirty i3 i1
+			)
+			/\
+			(
+				IsRead i1 => DataIsCorrectTranslation Accessed DirtyDontCare i3 i1
+			)
+			/\
+			AddEdges [((i3, (c, ViTLCreate)), (i1, (c, AccessTLB)), "SourceViTL", "red");
+				  ((i1, (c, AccessTLB)), (i3, (c, ViTLExpire)), "")]
+			/\
+			ExpandMacro TestPTWalk i3
+		)
+	)
+
+
+).
+
+
+
+DefineMacro "TestPTWalk" j:
+AddEdges [
+	  ((j, (c, WriteBack)), (j, (c, ViTLCreate)), "PTWalk");
+	  ((j, (c, ViTLCreate)), (j, (c, ViTLExpire)), "path");
+	  ((j, (c, LB-PTag)), (j, (c, AccessCache)), "path");
+%	  ((j, (c, LB-Index)), (j, (c, LB-PTag)), "path");
+	  ((j, (c, AccessCache)), (j, (c, WriteBack)), "path");
+	  ((j, (c, LB-Index)), (j, (c, LB-SB-IndexCompare)), "path")]
+/\
+(
+	(
+		ExpandMacro IndexMiss j
+			/\
+			(
+				(
+					(
+%						ExpandMacro BeforeWritesToSameVAPAOnSameCore j /\
+						ExpandMacro BeforeAllWrites j
+					) 
+				)
+				\/
+				(
+					ExpandMacro NoWritesToSamePABetweenSourceAndRead j
+					/\
+	        		ExpandMacro BeforeOrAfterEveryWriteToSamePA j
+	        		/\
+					(
+						(
+							ExpandMacro IndexMissComparison j
+						)
+					)
+				)
+			)
+	)
+	%\/
+	%ExpandMacro StoreBufferForwardPTWalk
+	%to do
+
+).
+
+Axiom "ViTLNoDuplicates":
+forall microops "i1",
+forall microops "i2",
+SameCore i1 i2 =>
+SmallerGlobalID i1 i2 =>
+AccessType ptwalk i1 =>
+AccessType ptwalk i2 =>
+SameVirtualTag i1 i2 =>
+NodesExist [(i1, (c, ViTLCreate));
+			(i2, (c, ViTLCreate))] =>
+
+AddEdge ((i1, (c, ViTLExpire)), (i2, (c, ViTLCreate)), "NoDuplicates", "crimson") \/
+AddEdge ((i2, (c, ViTLExpire)), (i1, (c, ViTLCreate)), "NoDuplicates", "crimson").
+
+Axiom "ViTLPPOUarch":
+forall microops "i1",
+forall microops "i2",
+~(SameMicroop i1 i2) =>
+SameCore i1 i2 =>
+AccessType ptwalk i1 =>
+AccessType ptwalk i2 =>
+SameVirtualTag i1 i2 =>
+(
+	(
+		EdgeExists ((i1, (c, AccessCache)),  (i2, (c, AccessCache)), "") => AddEdge ((i1, (c, ViTLExpire)), (i2, (c, ViTLCreate)), "ViTLPPO", "crimson")
+	)
+).
